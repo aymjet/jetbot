@@ -1,50 +1,56 @@
 # jetbot
 
-Discordの会話をSQLiteに保存し、OpenAI APIを使って質問回答と日本語要約を行う運営支援Bot。
-優先する範囲はjetbot本体・要約・ChatGPT/OpenAI連携・GitHubでのコード管理。X連携は今回の対象外。
+Discordサーバーで受信したメッセージをSQLiteに保存し、保存記録をOpenAI APIへ送って質問回答と日本語要約を行うBotです。
 
-## 現状機能
+## 実装されている機能
 
-| 操作 | 動作 |
+| 操作 | コードの処理 |
 | --- | --- |
-| 通常の投稿 | Bot以外のサーバー投稿をSQLiteへ保存 |
-| `!sync` | Botが読めるサーバー内のテキストチャンネルの過去ログを同期。件数は確認件数で、追加件数ではない |
-| `!ask 質問` | 同じサーバーの保存済みログを空白区切りの語で部分一致検索し、最大100件を使って回答 |
-| `!summary` | 現在のチャンネルの保存済みログ最新100件を日本語で要約 |
+| サーバー内の投稿 | Bot以外の投稿をSQLiteへ保存。コマンドの投稿も保存する |
+| `!sync` | 実行したサーバーのテキストチャンネルを順に処理し、取得できる過去メッセージを件数上限なしで保存。Botの投稿は除外 |
+| `!ask 質問` | 質問を空白で分割し、語ごとに同じサーバーの保存済み本文をSQLの `LIKE` で検索。各語の最新50件を取得し、重複除去後の先頭100件までをAPIへ送る |
+| `!summary` | 現在のチャンネルの保存済み最新100件を取得し、日時の昇順に並べてAPIへ送り、日本語での要約を要求する |
 
-回答はDiscordの文字数制限に合わせて2000文字ごとに分割。DMは処理しない。
-ChatGPTとの連携はOpenAI API呼び出しとして実装されており、ChatGPTの会話履歴やプロジェクトを読み込む機能はない。
-GitHub API連携は未実装で、まずこのコードをGitHubで管理する。
+`!sync` と `!summary` はメッセージ本文が完全一致した場合、`!ask` は本文が `!ask ` で始まる場合に処理します。
+DMとBotによる投稿は処理しません。保存には `INSERT OR IGNORE` を使い、同じメッセージIDの記録は追加・更新しません。
+同期完了時の件数は確認した投稿数で、DBへの追加件数ではありません。チャンネル取得中のエラーは標準出力に記録され、他のチャンネルの処理を続けます。
 
-## ファイル構成と元ファイル
+質問回答・要約にはOpenAIのResponses APIを使用します。API応答の `output_text` を2000文字ごとに分割してDiscordへ送信します。
+質問回答のプロンプトには、記録に基づいて回答し、記録にないことは推測しないよう指示しています。回答内容の正確性を別途検証する処理はありません。
+
+## ファイル構成
+
+リポジトリ内では、以下のファイルが `jetbot/` 配下にあります。
 
 ```text
-jetbot.py                 Bot本体
-scripts/check_openai.py    OpenAI API接続の手動確認（API利用料金が発生）
-requirements.txt          Python依存関係
-.env.example              値を含まない設定例
-.gitignore                秘密情報・会話DB・ローカル環境の除外設定
+jetbot/
+├── README.md
+├── jetbot.py                 Bot本体
+├── requirements.txt          Python依存関係
+├── .env.example              環境変数の設定例
+├── .gitignore                ローカル設定・DB等の除外設定
+└── scripts/
+    └── check_openai.py       OpenAI APIへの手動接続確認
 ```
 
-2026-10-06にローカルの `~/jetbot.py` を元に整理。
-`~/jetbot_sync_backup.py` は本体と同一、`~/jetbot_backup.py` は `!ai` の旧版のため含めていない。
-`~/jetbot_test.py` は手動API確認スクリプトとして整理した。
-`~/jetbot.db` と元ファイルはそのまま保持し、この配布用フォルダへDBはコピーしていない。
+依存関係の指定は `discord.py>=2.3,<3` と `openai>=1.66,<3` です。
+リポジトリ内にテストコード、Pythonバージョン指定、常駐運用・デプロイ用設定はありません。
 
 ## セットアップ
 
-Python 3.10以上、Discord Bot、OpenAI APIキー、インターネット接続が必要。
-macOS/Linuxの例（このフォルダ内で実行）:
+以下はmacOS/Linuxでのセットアップ手順です。PythonとGitを用意し、リポジトリを取得して `jetbot/` に移動します。
 
 ```sh
+git clone https://github.com/aymjet/jetbot.git
+cd jetbot/jetbot
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-`.env` をローカルで編集してキーを設定する。ファイル自体の自動読み込みは行わない。
-次の方法で環境変数へ読み込むため、`.env` には信頼できる設定だけを書き、値に空白等がある場合は引用符で囲む。
+`.env` を編集してDiscord Bot TokenとOpenAI APIキーを設定します。
+コードは `.env` を自動読み込みせず、環境変数を参照します。以下の方法では `.env` をシェルで実行するため、信頼できる設定だけを書き、必要に応じて値を引用符で囲んでください。
 
 ```sh
 set -a
@@ -53,57 +59,46 @@ set +a
 python jetbot.py
 ```
 
-Discord Developer PortalでBotのMessage Content Intentを有効にし、対象サーバーに招待する。
-対象チャンネルの閲覧・メッセージ送信・メッセージ履歴閲覧権限を付与する。
-依存関係のバージョン範囲は整理時点の指定で、インストール・実接続による動作確認は未実施。
+コードでは `message_content` Intentを有効にしています。Discord Developer PortalでもMessage Content Intentを有効にし、Botを対象サーバーへ招待してください。
+対象チャンネルの閲覧・メッセージ送信・メッセージ履歴閲覧権限が必要です。
 
 ## 環境変数
 
-| 名前 | 必須 | 説明 |
+| 名前 | 必須 | コードでの扱い |
 | --- | --- | --- |
-| `DISCORD_TOKEN` | 必須 | Discord Bot Token |
-| `OPENAI_API_KEY` | 必須 | OpenAI APIキー |
-| `OPENAI_MODEL` | 任意 | APIで利用するモデル。未指定時は元コードの `gpt-6-astra`。利用可否は未検証のため、アカウントで使えるモデルを指定する |
-| `JETBOT_DB_PATH` | 任意 | SQLiteファイルの場所。未指定時は本体と同じフォルダの `jetbot.db` |
+| `DISCORD_TOKEN` | 必須 | 未設定・空の場合、本体は起動時にエラーを出す |
+| `OPENAI_API_KEY` | 必須 | 未設定・空の場合、本体は起動時にエラーを出す |
+| `OPENAI_MODEL` | 任意 | 未指定時は `gpt-6-astra`。本体とAPI確認スクリプトの両方で使用 |
+| `JETBOT_DB_PATH` | 任意 | 未指定時は `jetbot.py` と同じディレクトリの `jetbot.db` |
 
-既存記録を利用する場合は、`JETBOT_DB_PATH` に既存DBの絶対パスを設定する。同じDBを使うBotを同時に複数起動しない。
-API接続だけを確認する場合は、環境変数を読み込んだ後に `python scripts/check_openai.py` を実行する。
+`gpt-6-astra` はコード内の既定値です。このREADMEの照合では、APIでの利用可否を確認していません。利用できるモデルを `OPENAI_MODEL` に設定してください。
+既存DBを利用する場合は `JETBOT_DB_PATH` にそのパスを指定します。相対パスは起動時の作業ディレクトリを基準に扱われます。
 
-## データと利用上の制約
-
-会話本文・投稿者・サーバー/チャンネルID・日時をSQLiteへ保存する。
-質問・要約では選択した会話をOpenAI APIへ送信する。
-現状、コマンド実行者の役職制限はなく、`!ask` は実行者が閲覧できないチャンネルの保存記録も検索対象にする。
-アクセス範囲を共有できる運営用サーバーで利用し、権限の異なる利用者へ展開する前に閲覧権限チェックを実装する。
-ログの編集・削除同期、スレッド同期、保存期間制限、API入力長の制限は未実装。
-
-秘密情報・Webhook・`.env`・DB・ログはGitHubに登録しない。
-`.gitignore` はコード内の秘密情報や既に追跡されているファイルを除去しないため、公開前には変更内容と履歴を確認する。
-整理時のコピー対象コードでは既知の秘密情報パターンと資格情報の直接代入を検査し、候補は検出されなかった。
-
-## GitHubへ登録
-
-接続済みGitHubで `jetbot` という名前のリポジトリは見つからなかった。接続範囲外のリポジトリの有無は未確認。
-既存リポジトリがある場合は、そちらを取得して、この一式の変更を確認してから反映する。
-新規の場合はGitHubで空のリポジトリを作成し、このフォルダで以下を実行する:
+環境変数を読み込んだ後、以下でOpenAI APIへの接続を手動確認できます。
 
 ```sh
-git init -b main
-git add .
-git diff --cached --stat
-git diff --cached
-git commit -m "Organize jetbot source and setup documentation"
-git remote add origin <作成したリポジトリのURL>
-git push -u origin main
+python scripts/check_openai.py
 ```
 
-## 今後のTODO
+このスクリプトは固定の挨拶文をAPIへ送って応答を表示します。DiscordとDBの動作確認は行いません。
 
-- コマンドの利用者・役職制限と、質問回答時のチャンネル閲覧権限チェック
-- 同期・質問・要約の動作テストと依存バージョンの固定
-- API入力長・費用・同時実行の制限、長いログの段階的要約
-- `!ask` の日本語検索改善と検索結果の時系列整理
-- 投稿の編集・削除同期、保存期間とDBバックアップ方針
-- 一般的なAI質問機能（旧版の `!ai`）を本体へ統合するか検討
-- GitHub連携の用途・権限を決定し、必要な機能を実装
-- X連携は今回の作業対象外
+## 保存データと制約
+
+SQLiteの `messages` テーブルに、メッセージID、サーバーID、チャンネルID・名前、投稿者の文字列表現、本文、投稿日時を保存します。
+質問・要約では選択した記録をOpenAI APIへ送信します。
+
+- コマンド実行者の利用権限・役職を確認する処理はありません。`!ask` はサーバーIDだけで検索範囲を絞り、実行者のチャンネル閲覧権限を確認しません。
+- `!ask` は語ごとの検索結果を連結するため、全体の最新100件を選ぶ処理ではありません。`LIKE` の `%` と `_` をエスケープする処理もありません。
+- `!summary` の対象には、そのコマンドの投稿も含まれます。
+- 投稿の編集・削除をDBへ反映する処理、保存期間制限、DBバックアップ処理はありません。
+- `!sync` は `guild.text_channels` を巡回し、スレッドの過去ログを個別に取得する処理はありません。スレッド内でも `on_message` に届くサーバー投稿は保存対象です。
+- API入力の文字数・トークン数・費用・同時実行数を制限する処理はありません。
+- ChatGPTの会話履歴・プロジェクトの取得、GitHub API連携、X連携、Ableton操作は実装されていません。
+
+`.gitignore` は `.env`、DB、ログ、ローカル環境などを除外し、`.env.example` は追跡対象にしています。
+既に追跡されているファイルやコード中の秘密情報は `.gitignore` では除去されません。
+
+## 確認範囲
+
+2026-10-07にGitHubの `main` ブランチのファイル構成と上記コードを読み、READMEの記載を照合しました。
+依存関係のインストール、Discordへの接続、OpenAI API呼び出し、実際の運用状況は今回確認していません。
